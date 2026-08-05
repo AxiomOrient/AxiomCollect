@@ -205,3 +205,6 @@ local verification entrypoint만 포함한다. `target/`, runtime artifact, Pupp
 runtime dependency, 플랫폼별 binary는 공개 source에 포함하지 않는다. Windows
 Job Object와 실제 설치 브라우저를 포함한 rendered 경로는 별도 환경 증거이며, source
 publication만으로 검증 완료나 제품 release를 주장하지 않는다.
+
+직접 dependency와 선택적 Puppeteer Core의 attribution은
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록한다.
