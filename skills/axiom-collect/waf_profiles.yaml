@@ -1,0 +1,86 @@
+# WAF Product Profiles — product artifacts only, never site-specific recipes.
+# The profile data is adapted from insane-search's public WAF profile catalog.
+_meta:
+  schema_version: 1
+  last_reviewed: "2026-07-20"
+
+akamai_bot_manager:
+  detectors:
+    cookie: ["_abck", "bm_sz", "ak_bmsc", "bm_sv", "bm_so"]
+    header: ["X-Akamai-*"]
+    server_contains: ["AkamaiGHost"]
+    body: ["sec-if-cpt-container", "Powered and protected by Akamai"]
+  confidence_rules: { strong: 2, weak: 1 }
+  tls_impersonate_candidates:
+    - [safari, safari15_3, safari15_5, safari17_0, safari260]
+    - [safari_ios, safari17_2_ios, safari260_ios]
+    - [chrome, chrome_android, chrome131, chrome131_android, chrome136]
+    - [edge99, edge101]
+  tls_impersonate_avoid: [safari18_0, chrome107, chrome120, chrome123, firefox]
+  referer_strategies: [self_root]
+  url_transform_order: [original, mobile_subdomain]
+
+cloudflare_turnstile:
+  detectors:
+    cookie: ["cf_clearance", "__cf_bm", "__cfduid"]
+    header: ["cf-ray", "cf-cache-status"]
+    server_contains: ["cloudflare"]
+    body: ["Just a moment...", "Checking your browser", "cf-chl-bypass", "Attention Required! | Cloudflare"]
+  tls_impersonate_candidates: [[chrome, chrome_android]]
+  referer_strategies: [google_search, self_root]
+  url_transform_order: [original]
+
+f5_big_ip:
+  detectors:
+    cookie: ["BigIPServer", "TS01*", "F5_*"]
+    body: ["The requested URL was rejected", "support ID is:"]
+  tls_impersonate_candidates: [[safari, chrome]]
+  referer_strategies: [self_root]
+
+aws_waf:
+  detectors:
+    cookie: ["aws-waf-token"]
+    header: ["x-amzn-requestid", "x-amzn-errortype", "x-amzn-waf-*"]
+  tls_impersonate_candidates: [[chrome]]
+  referer_strategies: [self_root]
+
+datadome_probable:
+  detectors:
+    cookie: ["datadome"]
+    body: ["DataDome"]
+  tls_impersonate_candidates: [[safari, chrome]]
+  referer_strategies: [self_root]
+  url_transform_order: [original, mobile_subdomain]
+
+perimeterx_human:
+  detectors:
+    cookie: ["_px3", "_pxhd", "_px2", "pxcts"]
+    body: ["px-captcha", "Press & Hold to confirm you are a human"]
+  tls_impersonate_candidates: [[safari, chrome]]
+  referer_strategies: [self_root]
+
+kasada_ips:
+  detectors:
+    header: ["x-kpsdk-*"]
+    body: ["x-kpsdk-ct", "kpsdk-v", "Kasada"]
+  confidence_rules: { strong: 2, weak: 1 }
+  tls_impersonate_candidates: [[chrome, chrome131, chrome136], [safari, safari260]]
+  referer_strategies: [self_root]
+  url_transform_order: [original]
+
+imperva_incapsula:
+  detectors:
+    cookie: ["incap_ses_*", "visid_incap_*"]
+    header: ["x-iinfo"]
+    body: ["Incapsula incident ID", "_Incapsula_Resource", "Request unsuccessful. Incapsula"]
+  confidence_rules: { strong: 2, weak: 1 }
+  tls_impersonate_candidates: [[chrome, chrome131, chrome136], [safari, safari260]]
+  referer_strategies: [self_root]
+  url_transform_order: [original]
+
+unknown_challenge:
+  detectors: {}
+  confidence_rules: { strong: 0, weak: 0 }
+  tls_impersonate_candidates: [[safari, chrome, firefox], [safari_ios, chrome_android]]
+  referer_strategies: [self_root, google_search, none]
+  url_transform_order: [original, mobile_subdomain, am_prefix, drop_www]

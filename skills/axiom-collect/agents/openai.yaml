@@ -1,0 +1,6 @@
+interface:
+  display_name: "Axiom Collect"
+  short_description: "Verify public URLs with bounded fallbacks"
+  default_prompt: "Use $axiom-collect to retrieve one public URL, recover through safe public routes when needed, and report evidence and provenance."
+policy:
+  allow_implicit_invocation: true

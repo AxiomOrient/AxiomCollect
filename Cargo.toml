@@ -1,0 +1,59 @@
+[package]
+name = "axiom-collect"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.97.1"
+description = "Fail-closed public URL retrieval with bounded HTTP and isolated installed-browser recovery"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "axiom_collect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "axiom-collect"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1.1"
+base64 = "=0.23.0"
+clap = { version = "4.5", features = ["derive"] }
+ego-tree = "0.11"
+encoding_rs = "0.8.35"
+eoka = "=0.5.4"
+futures-util = "0.3.31"
+iana-time-zone = "0.1.65"
+lopdf = { version = "=0.44.0", default-features = false }
+process-wrap = { version = "9.0", default-features = false, features = ["tokio1", "kill-on-drop", "process-group", "job-object"] }
+quick_html2md = "0.2.1"
+regex = "1.13"
+reqwest = { version = "0.13.4", default-features = false, features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls", "stream", "zstd"] }
+rmcp = { version = "3.0.1", features = ["transport-io"] }
+schemars = "1.2"
+scraper = "0.27.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.11.0"
+tempfile = "3.23"
+tokio = { version = "1.51.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+url = { version = "2.5", features = ["serde"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

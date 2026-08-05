@@ -1,0 +1,10 @@
+{
+  "name": "axiom-collect-puppeteer-rescue",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Explicit Puppeteer Core runtime for axiom-collect; never installs a browser",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "puppeteer-core": "25.4.0"
+  }
+}

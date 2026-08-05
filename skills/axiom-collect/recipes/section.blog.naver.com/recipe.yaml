@@ -1,0 +1,12 @@
+domain: section.blog.naver.com
+verified_at: "2026-07-20"
+status: active
+
+url_rewrites:
+  - name: home_to_directory_feed
+    pattern: '^https://section\.blog\.naver\.com/?(\?.*)?$'
+    replacement: '/ajax/DirectoryPostList.naver?directorySeq=0&pageNo=1'
+    headers:
+      Accept: 'application/json, text/javascript, */*; q=0.01'
+      Referer: 'https://section.blog.naver.com/'
+      X-Requested-With: XMLHttpRequest

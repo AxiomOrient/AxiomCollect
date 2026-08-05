@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+
+# Runtime artifacts
+/artifacts/
+
+# Optional Puppeteer Core install when prepared in the repository
+/puppeteer-rescue/node_modules/
+
+# Platform-specific skill runtime binaries are installed outside source control
+/skills/axiom-collect/bin/
+
+# Local-only files
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# GitHub Actions and CI/CD are intentionally unsupported
+/.github/workflows/
