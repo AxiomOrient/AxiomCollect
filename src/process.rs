@@ -66,6 +66,22 @@ struct LimitedRead {
     truncated: bool,
 }
 
+struct CommandProcess {
+    child: Box<dyn ChildWrapper>,
+    armed: bool,
+}
+
+impl Drop for CommandProcess {
+    fn drop(&mut self) {
+        if self.armed {
+            // Tokio's KillOnDrop only kills the direct child on Unix. Call the
+            // wrapper so cancellation also terminates its process group/job.
+            // Drop cannot await; the underlying child retains Tokio's reaper.
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
 pub async fn run_command(spec: CommandSpec) -> Result<CommandResult, Failure> {
     if spec.timeout.is_zero() {
         return Err(Failure::new(
@@ -73,6 +89,7 @@ pub async fn run_command(spec: CommandSpec) -> Result<CommandResult, Failure> {
             "provider command has no remaining wall-clock budget",
         ));
     }
+    let deadline = tokio::time::Instant::now() + spec.timeout;
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -93,7 +110,7 @@ pub async fn run_command(spec: CommandSpec) -> Result<CommandResult, Failure> {
     #[cfg(windows)]
     command.wrap(JobObject);
 
-    let mut child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         Failure::new(
             FailureCode::ProviderFailed,
             format!(
@@ -102,6 +119,8 @@ pub async fn run_command(spec: CommandSpec) -> Result<CommandResult, Failure> {
             ),
         )
     })?;
+    let mut process = CommandProcess { child, armed: true };
+    let child = &mut process.child;
 
     let stdout = child.stdout().take().ok_or_else(|| {
         Failure::new(
@@ -116,60 +135,94 @@ pub async fn run_command(spec: CommandSpec) -> Result<CommandResult, Failure> {
         )
     })?;
 
-    let stdout_limit = spec.stdout_limit;
-    let stderr_limit = spec.stderr_limit;
-    let stdout_task = tokio::spawn(async move { read_limited(stdout, stdout_limit).await });
-    let stderr_task = tokio::spawn(async move { read_limited(stderr, stderr_limit).await });
-
-    if let Some(input) = spec.stdin {
-        let mut stdin = child.stdin().take().ok_or_else(|| {
-            Failure::new(
-                FailureCode::InternalError,
-                "provider stdin pipe was not created",
-            )
-        })?;
-        // A child that never reads its stdin would otherwise fill the pipe and block
-        // this write past the point where the command timeout should have applied.
-        let write = async {
-            stdin.write_all(&input).await?;
-            stdin.shutdown().await
-        };
-        tokio::time::timeout(spec.timeout, write)
-            .await
-            .map_err(|_| {
-                Failure::new(
-                    FailureCode::BudgetExhausted,
-                    "provider did not accept its stdin within the command budget",
-                )
-            })?
-            .map_err(|error| {
-                Failure::new(
-                    FailureCode::ProviderFailed,
-                    format!("failed to write provider stdin: {error}"),
-                )
-            })?;
-    }
-
-    let wait_result = tokio::time::timeout(spec.timeout, child.wait()).await;
-    let (status, timed_out) = match wait_result {
-        Ok(result) => (
-            Some(result.map_err(|error| {
+    let mut stdout_read = LimitedRead {
+        bytes: Vec::new(),
+        truncated: false,
+    };
+    let mut stderr_read = LimitedRead {
+        bytes: Vec::new(),
+        truncated: false,
+    };
+    let mut stdin_pending = spec.stdin.is_some();
+    // The caller supplies one remaining wall-clock budget, including input and
+    // pipe drain. Keep readers in this future so timeout/cancellation closes the
+    // pipes rather than detaching tasks waiting on descendant-held descriptors.
+    let completion = tokio::time::timeout_at(deadline, async {
+        let process = async {
+            if let Some(input) = spec.stdin {
+                let mut stdin = child.stdin().take().ok_or_else(|| {
+                    Failure::new(
+                        FailureCode::InternalError,
+                        "provider stdin pipe was not created",
+                    )
+                })?;
+                let write = async {
+                    stdin.write_all(&input).await?;
+                    stdin.shutdown().await
+                };
+                write.await.map_err(|error| {
+                    Failure::new(
+                        FailureCode::ProviderFailed,
+                        format!("failed to write provider stdin: {error}"),
+                    )
+                })?;
+            }
+            stdin_pending = false;
+            child.wait().await.map_err(|error| {
                 Failure::new(
                     FailureCode::ProviderFailed,
                     format!("provider wait failed: {error}"),
                 )
-            })?),
-            false,
-        ),
-        Err(_) => {
-            let _ = Box::into_pin(child.kill()).await;
+            })
+        };
+        let stdout = async {
+            read_limited_into(stdout, spec.stdout_limit, &mut stdout_read)
+                .await
+                .map_err(|error| {
+                    Failure::new(
+                        FailureCode::ProviderFailed,
+                        format!("provider stdout read failed: {error}"),
+                    )
+                })
+        };
+        let stderr = async {
+            read_limited_into(stderr, spec.stderr_limit, &mut stderr_read)
+                .await
+                .map_err(|error| {
+                    Failure::new(
+                        FailureCode::ProviderFailed,
+                        format!("provider stderr read failed: {error}"),
+                    )
+                })
+        };
+        let (status, (), ()) = tokio::try_join!(process, stdout, stderr)?;
+        Ok::<_, Failure>(status)
+    })
+    .await;
+    let (status, timed_out) = match completion {
+        Ok(Ok(status)) => {
+            process.armed = false;
+            (Some(status), false)
+        }
+        result => {
+            // Reap the child even on stdin/read failure. No pipe reader remains
+            // to extend cleanup indefinitely after process-group termination.
+            let killed = Box::into_pin(child.kill()).await.is_ok();
             let status = child.wait().await.ok();
+            process.armed = !killed;
+            if let Ok(Err(failure)) = result {
+                return Err(failure);
+            }
+            if stdin_pending {
+                return Err(Failure::new(
+                    FailureCode::BudgetExhausted,
+                    "provider did not accept its stdin within the command budget",
+                ));
+            }
             (status, true)
         }
     };
 
-    let stdout_read = join_reader(stdout_task, "stdout").await?;
-    let stderr_read = join_reader(stderr_task, "stderr").await?;
     let success = !timed_out
         && status
             .as_ref()
@@ -459,28 +512,41 @@ async fn join_reader(
         })
 }
 
-async fn read_limited<R>(mut reader: R, limit: usize) -> std::io::Result<LimitedRead>
+async fn read_limited<R>(reader: R, limit: usize) -> std::io::Result<LimitedRead>
 where
     R: AsyncRead + Unpin,
 {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    let mut total = 0_usize;
+    let mut output = LimitedRead {
+        bytes: Vec::new(),
+        truncated: false,
+    };
+    read_limited_into(reader, limit, &mut output).await?;
+    Ok(output)
+}
+
+async fn read_limited_into<R>(
+    mut reader: R,
+    limit: usize,
+    output: &mut LimitedRead,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    output.bytes.reserve(limit.min(64 * 1024));
     let mut buffer = [0_u8; 8192];
     loop {
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
-            break;
+            return Ok(());
         }
-        total = total.saturating_add(read);
-        let remaining = limit.saturating_sub(bytes.len());
+        let remaining = limit.saturating_sub(output.bytes.len());
         if remaining > 0 {
-            bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+            output
+                .bytes
+                .extend_from_slice(&buffer[..read.min(remaining)]);
         }
+        output.truncated |= read > remaining;
     }
-    Ok(LimitedRead {
-        bytes,
-        truncated: total > limit,
-    })
 }
 
 pub(crate) fn is_executable_file(path: &Path) -> bool {
@@ -508,11 +574,177 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{CommandSpec, first_line, run_command};
+    use super::{CommandSpec, first_line, read_limited, run_command};
+    use crate::domain::FailureCode;
 
     #[test]
     fn first_line_is_bounded_to_one_line() {
         assert_eq!(first_line(b"one\ntwo"), "one");
+    }
+
+    #[cfg(unix)]
+    fn shell_command(script: &str, timeout: Duration) -> CommandSpec {
+        CommandSpec {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec![OsString::from("-c"), OsString::from(script)],
+            environment: BTreeMap::new(),
+            current_dir: std::env::temp_dir(),
+            stdin: None,
+            timeout,
+            stdout_limit: 1024,
+            stderr_limit: 1024,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_and_wait_share_the_command_budget() {
+        // Input exceeds pipe capacity, so the first sleep consumes the stdin
+        // budget. Each sleep fits individually; their sum exceeds the budget.
+        let mut spec = shell_command(
+            "sleep 1; cat >/dev/null; printf accepted; sleep 1",
+            Duration::from_millis(1500),
+        );
+        spec.stdin = Some(vec![b'x'; 1024 * 1024]);
+        let result = run_command(spec).await;
+        assert!(
+            result.as_ref().is_ok_and(|value| value.timed_out
+                && !value.success
+                && value.stdout == b"accepted"),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inherited_stdout_is_bounded_by_the_command_budget() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_command(shell_command(
+                "sleep 2 2>/dev/null & printf output",
+                Duration::from_millis(250),
+            )),
+        )
+        .await;
+        assert!(
+            result.as_ref().is_ok_and(|result| result
+                .as_ref()
+                .is_ok_and(|value| value.timed_out && !value.success && value.stdout == b"output")),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inherited_stderr_is_bounded_by_the_command_budget() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_command(shell_command(
+                "sleep 2 >/dev/null & printf diagnostic >&2",
+                Duration::from_millis(250),
+            )),
+        )
+        .await;
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|result| result.as_ref().is_ok_and(|value| value.timed_out
+                    && !value.success
+                    && value.stderr == b"diagnostic")),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_limits_still_drain_both_streams() {
+        let mut spec = shell_command(
+            "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
+            Duration::from_secs(5),
+        );
+        spec.stdout_limit = 17;
+        spec.stderr_limit = 23;
+        let result = run_command(spec).await;
+        assert!(
+            result.as_ref().is_ok_and(|value| value.success
+                && !value.timed_out
+                && value.stdout == vec![0; 17]
+                && value.stderr == vec![0; 23]),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_truncation_requires_bytes_beyond_the_limit() {
+        for (input, limit, truncated) in [
+            (b"abc".as_slice(), 3, false),
+            (b"abcd".as_slice(), 3, true),
+            (b"".as_slice(), 0, false),
+            (b"x".as_slice(), 0, true),
+        ] {
+            let result = read_limited(input, limit).await;
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|value| value.truncated == truncated
+                        && value.bytes == input[..input.len().min(limit)]),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_stdin_timeout_terminates_descendants() -> std::io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut spec = shell_command(
+            "(sleep 1; printf leaked > survived) & sleep 2",
+            Duration::from_millis(250),
+        );
+        spec.current_dir = directory.path().to_path_buf();
+        spec.stdin = Some(vec![b'x'; 1024 * 1024]);
+        let result = run_command(spec).await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|failure| failure.code == FailureCode::BudgetExhausted),
+            "{result:?}"
+        );
+        // A descendant that survives the timeout writes this marker. Give it
+        // ample time rather than requiring a narrow cleanup timing threshold.
+        tokio::time::sleep(Duration::from_millis(1250)).await;
+        assert!(!directory.path().join("survived").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_the_command_future_terminates_descendants() -> std::io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut spec = shell_command(
+            "(sleep 1; printf leaked > survived) & printf ready > started; wait",
+            Duration::from_secs(10),
+        );
+        spec.current_dir = directory.path().to_path_buf();
+        let mut command = Box::pin(run_command(spec));
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.path().join("started").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let observed = tokio::select! {
+            result = &mut command => Err(std::io::Error::other(format!(
+                "command exited before cancellation: {result:?}"
+            ))),
+            result = ready => result.map_err(std::io::Error::other),
+        };
+        // Like Engine's outer timeout or CLI cancellation, drop a command that
+        // has already launched its descendant, before its own deadline expires.
+        drop(command);
+        observed?;
+        tokio::time::sleep(Duration::from_millis(1250)).await;
+        assert!(!directory.path().join("survived").exists());
+        Ok(())
     }
 
     #[cfg(unix)]
